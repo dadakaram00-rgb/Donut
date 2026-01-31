@@ -76,49 +76,57 @@ def train():
         # Default fallback or logic for shortest_edge
         height, width = 2560, 1920
 
-    def transform(example):
-        # example is a dict: {"image": PIL.Image, "ground_truth": str}
-        image = example["image"]
-        ground_truth = example["ground_truth"]
+    def transform(examples):
+        # examples is a dict of lists: {"image": [PIL.Image], "ground_truth": [str]}
+        images = examples["image"]
+        ground_truths = examples["ground_truth"]
 
-        # Image processing
-        try:
-            # Processor handles single image, returns BatchFeature
-            # We want just the tensor: (1, 3, H, W)
-            pixel_values = processor(image, random_padding=True, return_tensors="pt").pixel_values
-            # Squeeze to (3, H, W) because collator will stack them
-            pixel_values = pixel_values.squeeze(0)
-        except Exception as e:
-            print(f"Error processing image: {e}")
-            return {}
+        batch_pixel_values = []
+        batch_labels = []
 
-        # Text processing
-        try:
-            gt_str = json.loads(ground_truth)["gt_parse"]
-            # Convert to string if it's a dict/list
-            if not isinstance(gt_str, str):
-                target_sequence = json.dumps(gt_str)
-            else:
-                target_sequence = gt_str
-        except:
-            target_sequence = ""
+        for image, gt in zip(images, ground_truths):
+            # Image processing
+            try:
+                # Processor returns (1, 3, H, W) for single image
+                pixel_values = processor(image, random_padding=True, return_tensors="pt").pixel_values
+                # We need (3, H, W) for the collator to stack later
+                batch_pixel_values.append(pixel_values.squeeze(0))
+            except Exception as e:
+                print(f"Error processing image: {e}")
+                # Append dummy or skip? Better to skip but that messes up batching.
+                # Ideally dataset shouldn't have bad images.
+                # For safety, let's just append zeros (very rare fallback)
+                batch_pixel_values.append(torch.zeros((3, height, width)))
 
-        target_sequence = target_sequence + processor.tokenizer.eos_token
+            # Text processing
+            try:
+                gt_str = json.loads(gt)["gt_parse"]
+                # Convert to string if it's a dict/list
+                if not isinstance(gt_str, str):
+                    target_sequence = json.dumps(gt_str)
+                else:
+                    target_sequence = gt_str
+            except:
+                target_sequence = ""
 
-        # Tokenize single example
-        # Don't pad to max_length here, let collator handle padding
-        input_ids = processor.tokenizer(
-            target_sequence,
-            add_special_tokens=False,
-            max_length=max_length,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids.squeeze(0) # Squeeze to get 1D tensor
+            target_sequence = target_sequence + processor.tokenizer.eos_token
 
-        # Return dict with tensors
+            # Tokenize
+            input_ids = processor.tokenizer(
+                target_sequence,
+                add_special_tokens=False,
+                max_length=max_length,
+                truncation=True,
+                return_tensors="pt",
+            ).input_ids.squeeze(0) # 1D tensor
+
+            batch_labels.append(input_ids)
+
+        # Return a dictionary where values are LISTS of tensors.
+        # datasets will interpret this as a batch of items.
         return {
-            "pixel_values": pixel_values,
-            "labels": input_ids,
+            "pixel_values": batch_pixel_values,
+            "labels": batch_labels,
         }
 
     print("Processing dataset (on-the-fly)...")
