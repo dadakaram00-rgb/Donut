@@ -26,9 +26,9 @@ class DonutDataCollator:
         for label in labels:
             remainder = [pad_token_id] * (max_label_length - len(label))
             if padding_side == "right":
-                padded_labels.append(torch.cat([label, torch.tensor(remainder)]))
+                padded_labels.append(torch.cat([label, torch.tensor(remainder, dtype=torch.long)]))
             else:
-                padded_labels.append(torch.cat([torch.tensor(remainder), label]))
+                padded_labels.append(torch.cat([torch.tensor(remainder, dtype=torch.long), label]))
 
         batch["labels"] = torch.stack(padded_labels)
 
@@ -76,51 +76,71 @@ def train():
         # Default fallback or logic for shortest_edge
         height, width = 2560, 1920
 
-    def transform(example):
+    def transform_batch(examples):
+        # examples is a dict of lists: {"image": [PIL.Image, ...], "ground_truth": [str, ...]}
+        images = examples["image"]
+        ground_truths = examples["ground_truth"]
+
         # Image processing
         try:
-            pixel_values = processor(example["image"], random_padding=True, return_tensors="pt").pixel_values
+            # Processor handles batch of images
+            pixel_values = processor(images, random_padding=True, return_tensors="pt").pixel_values
         except Exception as e:
-            print(f"Error processing image: {e}")
-            return None
+            print(f"Error processing images: {e}")
+            return {}
 
         # Text processing
-        # The ground truth is in "ground_truth" column as a string `{"gt_parse": ...}`
-        try:
-            gt_str = json.loads(example["ground_truth"])["gt_parse"]
-            # Convert to string if it's a dict/list
-            if not isinstance(gt_str, str):
-                target_sequence = json.dumps(gt_str)
-            else:
-                target_sequence = gt_str
-        except:
-            target_sequence = ""
+        batch_input_ids = []
+        for gt in ground_truths:
+            try:
+                gt_str = json.loads(gt)["gt_parse"]
+                # Convert to string if it's a dict/list
+                if not isinstance(gt_str, str):
+                    target_sequence = json.dumps(gt_str)
+                else:
+                    target_sequence = gt_str
+            except:
+                target_sequence = ""
 
-        target_sequence = target_sequence + processor.tokenizer.eos_token
+            target_sequence = target_sequence + processor.tokenizer.eos_token
 
-        # Tokenize
-        input_ids = processor.tokenizer(
-            target_sequence,
-            add_special_tokens=False,
-            max_length=max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids
+            # Tokenize single example
+            input_ids = processor.tokenizer(
+                target_sequence,
+                add_special_tokens=False,
+                max_length=max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            ).input_ids.squeeze() # Squeeze to get 1D tensor
 
-        labels = input_ids.clone()
+            batch_input_ids.append(input_ids)
+
+        # Stack input_ids
+        labels = torch.stack(batch_input_ids)
+
+        # Create a clone for labels where padding is -100 (though collator handles it, doing it here is fine too if collator expects it)
+        # But wait, our custom collator expects 'labels' to be a list of tensors or a tensor.
+        # Since we use set_transform, the collator receives a list of the dictionaries returned by this function if we were iterating.
+        # But set_transform works differently. It replaces the item access.
+        # When trainer accesses dataset[i], it gets the result of transform(batch_of_size_1) if not batched, or...
+        # Wait, set_transform(transform, output_all_columns=False)
+        # If we just access dataset[i], transform is called on the fly.
+
+        # Let's adjust to return a dict of tensors
+        # Note: if set_transform is used, the trainer gets a dict of values.
+
+        # Labels: set pad tokens to -100
         labels[labels == processor.tokenizer.pad_token_id] = -100
 
         return {
-            "pixel_values": pixel_values.squeeze(),
-            "labels": labels.squeeze(),
+            "pixel_values": pixel_values,
+            "labels": labels,
         }
 
-    print("Processing dataset...")
-    processed_dataset = dataset.map(transform, remove_columns=["image", "ground_truth"])
-
-    # IMPORTANT: Set format to torch so that the collator receives tensors, not lists
-    processed_dataset.set_format(type="torch", columns=["pixel_values", "labels"])
+    print("Processing dataset (on-the-fly)...")
+    # Use set_transform instead of map to avoid writing to disk
+    dataset.set_transform(transform_batch)
 
     # Custom Data Collator
     data_collator = DonutDataCollator(processor)
@@ -137,14 +157,19 @@ def train():
         save_steps=100,
         eval_strategy="no",
         use_cpu=True, # Force CPU
-        remove_unused_columns=True,
+        remove_unused_columns=False, # We need to keep columns for the transform to work on them? No, transform replaces them.
+        # But remove_unused_columns=True tries to inspect the model signature and remove columns from the dataset.
+        # Since we use set_transform, we must ensure that the dataset *yields* the right columns.
+        # set_transform output overrides the columns.
+        # So we should be fine. But set remove_unused_columns=False to be safe with custom transforms usually.
+        # However, we only output pixel_values and labels.
         save_total_limit=1,
     )
 
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
-        train_dataset=processed_dataset,
+        train_dataset=dataset,
         tokenizer=processor.tokenizer,
         data_collator=data_collator,
     )
