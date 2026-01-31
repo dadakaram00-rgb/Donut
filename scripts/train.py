@@ -4,6 +4,39 @@ import torch
 from transformers import VisionEncoderDecoderModel, DonutProcessor, Seq2SeqTrainingArguments, Seq2SeqTrainer
 from datasets import load_dataset
 
+class DonutDataCollator:
+    def __init__(self, processor):
+        self.processor = processor
+
+    def __call__(self, features):
+        pixel_values = [feature["pixel_values"] for feature in features]
+        labels = [feature["labels"] for feature in features]
+
+        # Stack pixel values
+        batch = {
+            "pixel_values": torch.stack(pixel_values)
+        }
+
+        # Pad labels
+        max_label_length = max(len(l) for l in labels)
+        padding_side = self.processor.tokenizer.padding_side
+        pad_token_id = self.processor.tokenizer.pad_token_id
+
+        padded_labels = []
+        for label in labels:
+            remainder = [pad_token_id] * (max_label_length - len(label))
+            if padding_side == "right":
+                padded_labels.append(torch.cat([label, torch.tensor(remainder)]))
+            else:
+                padded_labels.append(torch.cat([torch.tensor(remainder), label]))
+
+        batch["labels"] = torch.stack(padded_labels)
+
+        # Set -100 for pad tokens in labels so they are ignored in loss
+        batch["labels"][batch["labels"] == pad_token_id] = -100
+
+        return batch
+
 def train():
     # Configuration
     base_model_path = "models/donut-base"
@@ -86,6 +119,12 @@ def train():
     print("Processing dataset...")
     processed_dataset = dataset.map(transform, remove_columns=["image", "ground_truth"])
 
+    # IMPORTANT: Set format to torch so that the collator receives tensors, not lists
+    processed_dataset.set_format(type="torch", columns=["pixel_values", "labels"])
+
+    # Custom Data Collator
+    data_collator = DonutDataCollator(processor)
+
     # Training args
     # CPU optimization: use_cpu=True
     training_args = Seq2SeqTrainingArguments(
@@ -107,6 +146,7 @@ def train():
         args=training_args,
         train_dataset=processed_dataset,
         tokenizer=processor.tokenizer,
+        data_collator=data_collator,
     )
 
     print("Starting training on CPU...")
