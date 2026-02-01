@@ -4,3 +4,4 @@ datasets
 sentencepiece
 protobuf
 Pillow
+accelerate

@@ -149,12 +149,22 @@ def train():
         save_total_limit=1,
     )
 
+    # Determine the correct argument for the tokenizer/processor
+    # Transformers 5.0.0+ uses 'processing_class', older versions use 'tokenizer'
+    import transformers
+    from packaging import version
+
+    if version.parse(transformers.__version__) >= version.parse("5.0.0"):
+        trainer_kwargs = {"processing_class": processor.tokenizer}
+    else:
+        trainer_kwargs = {"tokenizer": processor.tokenizer}
+
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=processor.tokenizer,
         data_collator=data_collator,
+        **trainer_kwargs
     )
 
     print("Starting training on CPU...")
