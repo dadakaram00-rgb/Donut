@@ -53,6 +53,14 @@ def train():
     processor = DonutProcessor.from_pretrained(base_model_path)
     model = VisionEncoderDecoderModel.from_pretrained(base_model_path)
 
+    # Resize input size to save memory (10GB is tight for standard Donut 2560x1920)
+    # Reducing to half resolution: 1280x960
+    new_height, new_width = 1280, 960
+    print(f"Adjusting image size to {new_height}x{new_width} to save memory...")
+    processor.image_processor.size = {"height": new_height, "width": new_width}
+    # Update model config if needed (though Swin is flexible, input_size is often used for interpolation)
+    model.config.input_size = [new_height, new_width]
+
     # Configure model for training
     model.config.decoder_start_token_id = processor.tokenizer.cls_token_id
     model.config.pad_token_id = processor.tokenizer.pad_token_id
@@ -67,13 +75,11 @@ def train():
         return
 
     # Constants
-    max_length = 768
+    max_length = 512 # Reduced from 768 to save memory
     image_size = processor.image_processor.size
-    # Handle different size formats (some versions use shortest_edge, some height/width)
     if "height" in image_size:
         height, width = image_size["height"], image_size["width"]
     else:
-        # Default fallback or logic for shortest_edge
         height, width = 2560, 1920
 
     def transform(examples):
@@ -87,21 +93,16 @@ def train():
         for image, gt in zip(images, ground_truths):
             # Image processing
             try:
-                # Processor returns (1, 3, H, W) for single image
-                pixel_values = processor(image, random_padding=True, return_tensors="pt").pixel_values
-                # We need (3, H, W) for the collator to stack later
+                # Removed random_padding=True as it is deprecated/ignored and causes warnings
+                pixel_values = processor(image, return_tensors="pt").pixel_values
                 batch_pixel_values.append(pixel_values.squeeze(0))
             except Exception as e:
                 print(f"Error processing image: {e}")
-                # Append dummy or skip? Better to skip but that messes up batching.
-                # Ideally dataset shouldn't have bad images.
-                # For safety, let's just append zeros (very rare fallback)
                 batch_pixel_values.append(torch.zeros((3, height, width)))
 
             # Text processing
             try:
                 gt_str = json.loads(gt)["gt_parse"]
-                # Convert to string if it's a dict/list
                 if not isinstance(gt_str, str):
                     target_sequence = json.dumps(gt_str)
                 else:
@@ -118,37 +119,33 @@ def train():
                 max_length=max_length,
                 truncation=True,
                 return_tensors="pt",
-            ).input_ids.squeeze(0) # 1D tensor
+            ).input_ids.squeeze(0)
 
             batch_labels.append(input_ids)
 
-        # Return a dictionary where values are LISTS of tensors.
-        # datasets will interpret this as a batch of items.
         return {
             "pixel_values": batch_pixel_values,
             "labels": batch_labels,
         }
 
     print("Processing dataset (on-the-fly)...")
-    # Use set_transform instead of map to avoid writing to disk
     dataset.set_transform(transform)
 
     # Custom Data Collator
     data_collator = DonutDataCollator(processor)
 
     # Training args
-    # CPU optimization: use_cpu=True
     training_args = Seq2SeqTrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=1, # Small batch size for CPU
+        per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
-        num_train_epochs=3, # Small number for demo
+        num_train_epochs=3,
         learning_rate=2e-5,
         logging_steps=1,
         save_steps=100,
         eval_strategy="no",
-        use_cpu=True, # Force CPU
-        remove_unused_columns=False, # We need to keep columns for the transform to work on them
+        use_cpu=True,
+        remove_unused_columns=False,
         save_total_limit=1,
     )
 
