@@ -5,16 +5,27 @@ import torch
 from PIL import Image
 from transformers import VisionEncoderDecoderModel, DonutProcessor
 
+# Strict Offline Mode
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+
 def inference(image_path, model_path="models/donut-finetuned"):
     print(f"Loading model from {model_path}...")
+
+    # Strict Local Check
     if not os.path.exists(model_path):
-        print(f"Model path {model_path} does not exist. Using base model for demonstration.")
+        # Fallback to local base model if finetuned doesn't exist
+        print(f"Model path {model_path} does not exist. Checking local base model at models/donut-base...")
         model_path = "models/donut-base"
         if not os.path.exists(model_path):
-             model_path = "naver-clova-ix/donut-base"
+             raise FileNotFoundError(
+                f"Model not found at {model_path}. "
+                "Since you are offline, you must first run 'python scripts/download_model.py' "
+                "on an online machine and transfer the 'models' directory to this machine."
+            )
 
-    processor = DonutProcessor.from_pretrained(model_path)
-    model = VisionEncoderDecoderModel.from_pretrained(model_path)
+    processor = DonutProcessor.from_pretrained(model_path, local_files_only=True)
+    model = VisionEncoderDecoderModel.from_pretrained(model_path, local_files_only=True)
 
     # Move to CPU explicitly (though it is default)
     device = "cpu"
@@ -24,14 +35,18 @@ def inference(image_path, model_path="models/donut-finetuned"):
     print(f"Processing image {image_path}...")
     image = Image.open(image_path).convert("RGB")
 
+    # Resize image to match training if necessary (optional but good for consistency)
+    # processor.image_processor.size = {"height": 1280, "width": 960}
+
     # Prepare input
+    # Removed random_padding argument to avoid warnings
     pixel_values = processor(image, return_tensors="pt").pixel_values
     pixel_values = pixel_values.to(device)
 
     # Generate
     outputs = model.generate(
         pixel_values,
-        max_length=768,
+        max_length=512, # Matching training config
         early_stopping=True,
         pad_token_id=processor.tokenizer.pad_token_id,
         eos_token_id=processor.tokenizer.eos_token_id,

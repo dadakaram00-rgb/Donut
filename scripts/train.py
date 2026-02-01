@@ -4,6 +4,10 @@ import torch
 from transformers import VisionEncoderDecoderModel, DonutProcessor, Seq2SeqTrainingArguments, Seq2SeqTrainer
 from datasets import load_dataset
 
+# Strict Offline Mode
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+
 class DonutDataCollator:
     def __init__(self, processor):
         self.processor = processor
@@ -40,18 +44,22 @@ class DonutDataCollator:
 def train():
     # Configuration
     base_model_path = "models/donut-base"
-    # If base model doesn't exist locally, fallback to huggingface hub
+
+    # Strict Offline Check
     if not os.path.exists(base_model_path):
-        print(f"Local model not found at {base_model_path}, using naver-clova-ix/donut-base")
-        base_model_path = "naver-clova-ix/donut-base"
+        raise FileNotFoundError(
+            f"Model not found at {base_model_path}. "
+            "Since you are offline, you must first run 'python scripts/download_model.py' "
+            "on an online machine and transfer the 'models' directory to this machine."
+        )
 
     data_dir = "data"
     output_dir = "models/donut-finetuned"
 
-    print("Loading model and processor...")
-    # Load processor and model
-    processor = DonutProcessor.from_pretrained(base_model_path)
-    model = VisionEncoderDecoderModel.from_pretrained(base_model_path)
+    print(f"Loading model and processor from {base_model_path} (local only)...")
+    # Load processor and model with local_files_only=True
+    processor = DonutProcessor.from_pretrained(base_model_path, local_files_only=True)
+    model = VisionEncoderDecoderModel.from_pretrained(base_model_path, local_files_only=True)
 
     # Resize input size to save memory (10GB is tight for standard Donut 2560x1920)
     # Reducing to half resolution: 1280x960
